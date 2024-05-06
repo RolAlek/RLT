@@ -1,16 +1,41 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
+from dateutil.relativedelta import relativedelta
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
 
-SELECTED_DT_FORMATS = {
+SLCD_FRMTS = {
     'hour': '%Y-%m-%d %H',
     'day': '%Y-%m-%d',
-    'week': '%Y-%U',
     'month': '%Y-%m',
 }
 DT_FRMT = "%Y-%m-%dT%H:%M:%S"
+
+
+def get_dt_range(dt_from: str, dt_upto: str, group_type: str) -> list[str]:
+    dt_range = []
+    current_dt = datetime.strptime(dt_from, DT_FRMT)
+
+    while current_dt <= datetime.strptime(dt_upto, DT_FRMT):
+
+        if group_type == 'month':
+            shift = relativedelta(months=1)
+        elif group_type == 'day':
+            shift = timedelta(days=1)
+        elif group_type == 'hour':
+            shift = timedelta(hours=1)
+
+        date = current_dt.strftime(SLCD_FRMTS[group_type])
+        dt_range.append(
+            datetime.strptime(
+                date,
+                SLCD_FRMTS[group_type]
+            ).isoformat()
+        )
+        current_dt += shift
+
+    return dt_range
 
 
 async def calculate_sum_all_payments(
@@ -34,7 +59,7 @@ async def calculate_sum_all_payments(
                 '_id': {
                     '$dateToString': {
                         'date': '$dt',
-                        'format': SELECTED_DT_FORMATS[group_type],
+                        'format': SLCD_FRMTS[group_type],
                     },
                 },
                 'value': {'$sum': '$value'},
@@ -46,15 +71,22 @@ async def calculate_sum_all_payments(
                 'label': '$_id',
                 'amount': '$value',
             }
+        },
+        {
+            '$sort': {'label': 1}
         }
     ]
     cursor = collection.aggregate(pipeline)
-    result = [doc async for doc in cursor]
-    dataset = [entry['amount'] for entry in result]
+    data = [doc async for doc in cursor]
+    dataset = [entry['amount'] for entry in data]
     labels = [
-        datetime.strptime(entry['label'], SELECTED_DT_FORMATS[group_type])
-        .replace(day=1, hour=0, minute=0, second=0)
-        .strftime(DT_FRMT)
-        for entry in result
+        datetime.strptime(entry['label'], SLCD_FRMTS[group_type]).isoformat()
+        for entry in data
     ]
-    return json.dumps({"dataset": dataset, "labels": labels})
+    for index, date in enumerate(get_dt_range(dt_from, dt_upto, group_type)):
+        if date not in labels:
+            dataset.insert(index, 0)
+            labels.insert(index, date)
+
+    final_data = {'dataset': dataset, 'labels': labels}
+    return json.dumps(final_data)

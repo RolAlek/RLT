@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 import json
 from dateutil.relativedelta import relativedelta
 
-from motor.motor_asyncio import AsyncIOMotorClient
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorCommandCursor
 
 
 SLCD_FRMTS = {
@@ -13,18 +13,19 @@ SLCD_FRMTS = {
 DT_FRMT = "%Y-%m-%dT%H:%M:%S"
 
 
-def get_dt_range(dt_from: str, dt_upto: str, group_type: str) -> list[str]:
-    dt_range = []
+async def get_dt_range(
+    dt_from: str,
+    dt_upto: str,
+    group_type: str
+) -> list[str]:
     current_dt = datetime.strptime(dt_from, DT_FRMT)
-
+    dt_range = []
     while current_dt <= datetime.strptime(dt_upto, DT_FRMT):
 
-        if group_type == 'month':
-            shift = relativedelta(months=1)
-        elif group_type == 'day':
-            shift = timedelta(days=1)
-        elif group_type == 'hour':
-            shift = timedelta(hours=1)
+        match group_type:
+            case 'month': shift = relativedelta(months=1)
+            case 'day': shift = timedelta(days=1)
+            case 'hour': shift = timedelta(hours=1)
 
         date = current_dt.strftime(SLCD_FRMTS[group_type])
         dt_range.append(
@@ -38,13 +39,12 @@ def get_dt_range(dt_from: str, dt_upto: str, group_type: str) -> list[str]:
     return dt_range
 
 
-async def calculate_sum_all_payments(
+async def get_payments_data(
     dt_from: str,
     dt_upto: str,
     group_type: str,
     client: AsyncIOMotorClient,
-) -> dict[str, list]:
-    collection = client.sampleDB.sample_collection
+) -> AsyncIOMotorCommandCursor:
     pipeline = [
         {
             '$match': {
@@ -76,17 +76,46 @@ async def calculate_sum_all_payments(
             '$sort': {'label': 1}
         }
     ]
-    cursor = collection.aggregate(pipeline)
-    data = [doc async for doc in cursor]
+    return client.sampleDB.sample_collection.aggregate(pipeline)
+
+
+async def get_result(
+    data: list[dict],
+    dt_from: str,
+    dt_upto: str,
+    group_type: str
+) -> dict[str, list[int | str]]:
     dataset = [entry['amount'] for entry in data]
     labels = [
         datetime.strptime(entry['label'], SLCD_FRMTS[group_type]).isoformat()
         for entry in data
     ]
-    for index, date in enumerate(get_dt_range(dt_from, dt_upto, group_type)):
+
+    for index, date in enumerate(
+        await get_dt_range(dt_from, dt_upto, group_type)
+    ):
         if date not in labels:
             dataset.insert(index, 0)
             labels.insert(index, date)
 
-    final_data = {'dataset': dataset, 'labels': labels}
-    return json.dumps(final_data)
+    return {'dataset': dataset, 'labels': labels}
+
+
+async def calculate_sum_all_payments(
+    dt_from: str,
+    dt_upto: str,
+    group_type: str,
+    client: AsyncIOMotorClient,
+) -> str:
+    data = [
+        doc
+        async for doc in await get_payments_data(
+            dt_from,
+            dt_upto,
+            group_type,
+            client
+        )
+    ]
+    return json.dumps(
+        await get_result(data, dt_from, dt_upto, group_type)
+    )
